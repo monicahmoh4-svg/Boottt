@@ -5,7 +5,7 @@ const DEFAULT_RULES: Rules = {
   targetProfit: 100,
   stopLoss: 50,
   tradeDurationSec: 60,
-  signalThreshold: 60,
+  signalThreshold: 40,  // ← LOWERED from 60 to 40 so trades actually execute
   maxOpenTrades: 3,
   enabledMarkets: ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
 };
@@ -23,19 +23,27 @@ export function defaultAccount(): Account {
   return { ...DEFAULT_ACCOUNT, equityCurve: [...DEFAULT_ACCOUNT.equityCurve] };
 }
 
-export function canTrade(state: BotState, signal: Signal): boolean {
-  if (!state.running) return false;
-  if (signal.direction === "NEUTRAL") return false;
-  if (signal.strength < state.rules.signalThreshold) return false;
-  if (!state.rules.enabledMarkets.includes(signal.symbol)) return false;
+export function canTrade(state: BotState, signal: Signal): { allowed: boolean; reason?: string } {
+  if (!state.running) return { allowed: false, reason: "Bot not running" };
+  if (signal.direction === "NEUTRAL") return { allowed: false, reason: "Neutral signal" };
+  if (signal.strength < state.rules.signalThreshold) {
+    return { allowed: false, reason: `Strength ${signal.strength} < threshold ${state.rules.signalThreshold}` };
+  }
+  if (!state.rules.enabledMarkets.includes(signal.symbol)) {
+    return { allowed: false, reason: "Market not enabled" };
+  }
   const openCount = state.trades.filter((t) => t.status === "OPEN").length;
-  if (openCount >= state.rules.maxOpenTrades) return false;
-  if (state.account.balance < state.rules.stake) return false;
+  if (openCount >= state.rules.maxOpenTrades) {
+    return { allowed: false, reason: `Max open trades (${state.rules.maxOpenTrades}) reached` };
+  }
+  if (state.account.balance < state.rules.stake) {
+    return { allowed: false, reason: "Insufficient balance" };
+  }
   const alreadyOpen = state.trades.some(
     (t) => t.symbol === signal.symbol && t.status === "OPEN"
   );
-  if (alreadyOpen) return false;
-  return true;
+  if (alreadyOpen) return { allowed: false, reason: "Trade already open on this symbol" };
+  return { allowed: true };
 }
 
 export function openTrade(state: BotState, signal: Signal): Trade {
