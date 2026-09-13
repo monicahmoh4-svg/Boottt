@@ -49,8 +49,12 @@ export default function Dashboard({ username, mode, onLogout }: Props) {
     const tick = async () => {
       if (cancelled) return;
       try {
+        console.log("[Bot] Scanning markets...");
         const markets = await fetchAllMarkets();
+        console.log(`[Bot] Fetched ${markets.length} markets`);
+        
         const newSignals: Signal[] = markets.map((m) => analyze(m));
+        console.log(`[Bot] Generated ${newSignals.length} signals`);
 
         setState((prev) => {
           let next: BotState = {
@@ -60,14 +64,20 @@ export default function Dashboard({ username, mode, onLogout }: Props) {
             lastTick: Date.now(),
           };
 
+          // Close expired trades
           const now = Date.now();
           const tradesToClose: Trade[] = [];
           const stillOpen: Trade[] = [];
           for (const t of next.trades) {
             if (t.status === "OPEN" && now - t.openedAt >= t.durationSec * 1000) {
               const mkt = markets.find((m) => m.symbol === t.symbol);
-              if (mkt) tradesToClose.push(closeTrade(t, mkt.price));
-              else stillOpen.push(t);
+              if (mkt) {
+                const closed = closeTrade(t, mkt.price);
+                tradesToClose.push(closed);
+                console.log(`[Bot] Closed trade ${t.symbol} ${t.direction}: ${closed.status} (PnL: $${closed.pnl?.toFixed(2)})`);
+              } else {
+                stillOpen.push(t);
+              }
             } else {
               stillOpen.push(t);
             }
@@ -79,39 +89,54 @@ export default function Dashboard({ username, mode, onLogout }: Props) {
           }
           next = { ...next, trades: [...stillOpen, ...tradesToClose], account };
 
+          // Check stop conditions
           const stop = checkStopConditions(account, next.rules);
           if (stop !== "OK") {
+            console.log(`[Bot] Stop condition triggered: ${stop}`);
             next = { ...next, running: false };
           }
 
+          // Open new trades
           if (next.running) {
             const toOpen: Trade[] = [];
             for (const sig of newSignals) {
-              if (canTrade(next, sig)) {
-                toOpen.push(openTrade(next, sig));
+              const check = canTrade(next, sig);
+              if (check.allowed) {
+                const trade = openTrade(next, sig);
+                toOpen.push(trade);
+                console.log(`[Bot] Opening trade: ${sig.symbol} ${sig.direction} @ $${sig.price.toFixed(2)} (strength: ${sig.strength})`);
+                // Update next state to prevent duplicate checks in same tick
+                next = { ...next, trades: [...next.trades, trade] };
+              } else if (sig.direction !== "NEUTRAL" && sig.strength >= 30) {
+                console.log(`[Bot] Skip ${sig.symbol}: ${check.reason}`);
               }
-            }
-            if (toOpen.length) {
-              const existingIds = new Set(next.trades.map((t) => t.id));
-              const fresh = toOpen.filter((t) => !existingIds.has(t.id));
-              next = { ...next, trades: [...next.trades, ...fresh] };
             }
           }
 
           return next;
         });
       } catch (e) {
-        console.error("tick error", e);
+        console.error("[Bot] Tick error:", e);
       }
       if (!cancelled) setTimeout(tick, 15_000);
     };
+    
+    // Initial tick
     tick();
     return () => { cancelled = true; };
   }, []);
 
-  const toggle = () => setState((s) => ({ ...s, running: !s.running }));
+  const toggle = () => {
+    setState((s) => {
+      const newRunning = !s.running;
+      console.log(`[Bot] ${newRunning ? "Started" : "Stopped"}`);
+      return { ...s, running: newRunning };
+    });
+  };
+  
   const reset = () => {
     if (typeof window !== "undefined" && !confirm("Reset account to $10,000 and clear all trades?")) return;
+    console.log("[Bot] Resetting account");
     setState((s) => ({
       ...s,
       running: false,
@@ -137,7 +162,7 @@ export default function Dashboard({ username, mode, onLogout }: Props) {
                 {state.running ? (
                   <span className="flex items-center gap-1 text-brand-accent">
                     <span className="live-dot inline-block h-1.5 w-1.5 rounded-full bg-brand-accent" />
-                    Running
+                    Running · Scanning every 15s
                   </span>
                 ) : "Idle"}
               </div>
@@ -178,7 +203,11 @@ export default function Dashboard({ username, mode, onLogout }: Props) {
           <div className="lg:col-span-2 space-y-6">
             <EquityChart account={state.account} />
             <div className="grid gap-6 md:grid-cols-2">
-              <MarketScanner markets={state.markets} signals={state.signals} />
+              <MarketScanner 
+                markets={state.markets} 
+                signals={state.signals}
+                lastTick={state.lastTick}
+              />
               <SignalFeed signals={state.signals} />
             </div>
             <TradeLog trades={state.trades} />
